@@ -1,10 +1,7 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { highlightCodeToHtmlLines } from "./components/code-highlight-server";
 import { FanOutDemo } from "./components/demo";
-
-// These strings are copied from workflows/incident-fanout.ts.
-// Directives use interpolation to avoid withWorkflow() plugin scanning.
-const wf = `"use ${"workflow"}"`;
-const st = `"use ${"step"}"`;
 
 type ChannelId = "slack" | "email" | "sms" | "pagerduty";
 
@@ -19,161 +16,45 @@ type StepLineMap = Record<ChannelId, number[]>;
 type StepErrorLineMap = Record<ChannelId, number[]>;
 type StepSuccessLineMap = Record<ChannelId, number[]>;
 
-// Source: workflows/incident-fanout.ts — incidentFanOut()
-const workflowCode = `export async function incidentFanOut(
-  incidentId: string,
-  message: string,
-  failChannels: NotificationChannel[] = []
-): Promise<IncidentReport> {
-  ${wf};
+// Read the actual workflow source file — displayed in the code workbench
+const workflowSource = readFileSync(
+  join(process.cwd(), "workflows/incident-fanout.ts"),
+  "utf-8"
+);
 
-  const fanOutTargets = [
-    {
-      channel: "slack" as const,
-      send: () => sendSlackAlert(incidentId, message, failChannels),
-    },
-    {
-      channel: "email" as const,
-      send: () => sendEmailAlert(incidentId, message, failChannels),
-    },
-    {
-      channel: "sms" as const,
-      send: () => sendSmsAlert(incidentId, message, failChannels),
-    },
-    {
-      channel: "pagerduty" as const,
-      send: () => sendPagerDutyAlert(incidentId, message, failChannels),
-    },
-  ];
-
-  const settled = await Promise.allSettled(
-    fanOutTargets.map((target) => target.send())
-  );
-
-  const deliveries: ChannelResult[] = settled.map((result, index) => {
-    const channel = fanOutTargets[index].channel;
-
-    if (result.status === "fulfilled") {
-      return {
-        channel,
-        status: "sent",
-        providerId: result.value.providerId,
-      };
-    }
-
-    return {
-      channel,
-      status: "failed",
-      error: formatChannelError(channel, result.reason),
-    };
-  });
-
-  return aggregateResults(incidentId, message, deliveries);
-}`;
-
-// Source: workflows/incident-fanout.ts — step functions
-const stepCode = `async function sendChannelAlert(
-  channel: NotificationChannel,
-  incidentId: string,
-  message: string,
-  failChannels: NotificationChannel[]
-): Promise<{ providerId: string }> {
-  // Demo: stream progress events to the UI via getWritable()
-  const writer = getWritable<ChannelEvent>().getWriter();
-  const { attempt } = getStepMetadata();
-
-  try {
-    if (attempt > 1) {
-      await writer.write({ type: "channel_retrying", channel, attempt }); // Demo: notify UI of retry
-    }
-
-    await writer.write({ type: "channel_sending", channel }); // Demo: notify UI that this channel started
-    await delay(CHANNEL_DELAY_MS[channel]); // Demo: simulate network latency for visualization
-
-    if (attempt === 1 && failChannels.includes(channel)) {
-      throw new Error(CHANNEL_ERROR_MESSAGES[channel]);
-    }
-
-    const providerId = \`\${channel}_\${incidentId}_\${message.length}_\${attempt}\`;
-    await writer.write({ type: "channel_sent", channel, providerId }); // Demo: notify UI of success
-
-    return { providerId };
-  } catch (reason: unknown) {
-    const error = toChannelErrorMessage(reason);
-    await writer.write({ type: "channel_failed", channel, error, attempt }); // Demo: notify UI of failure
-
-    throw reason instanceof Error ? reason : new Error(error);
-  } finally {
-    writer.releaseLock();
+function extractFunctionBlock(source: string, marker: string): string {
+  const lines = source.split("\n");
+  const start = lines.findIndex((line) => line.includes(marker));
+  if (start === -1) return "";
+  const output: string[] = [];
+  let depth = 0;
+  let sawBrace = false;
+  for (let i = start; i < lines.length; i++) {
+    output.push(lines[i]);
+    const opens = (lines[i].match(/{/g) ?? []).length;
+    const closes = (lines[i].match(/}/g) ?? []).length;
+    depth += opens - closes;
+    if (opens > 0) sawBrace = true;
+    if (sawBrace && depth === 0) break;
   }
+  return output.join("\n");
 }
 
-async function sendSlackAlert(
-  incidentId: string,
-  message: string,
-  failChannels: NotificationChannel[]
-): Promise<{ providerId: string }> {
-  ${st};
-  return sendChannelAlert("slack", incidentId, message, failChannels);
-}
+const workflowCode = extractFunctionBlock(workflowSource, "export async function incidentFanOut(");
 
-async function sendEmailAlert(
-  incidentId: string,
-  message: string,
-  failChannels: NotificationChannel[]
-): Promise<{ providerId: string }> {
-  ${st};
-  return sendChannelAlert("email", incidentId, message, failChannels);
-}
-
-async function sendSmsAlert(
-  incidentId: string,
-  message: string,
-  failChannels: NotificationChannel[]
-): Promise<{ providerId: string }> {
-  ${st};
-  return sendChannelAlert("sms", incidentId, message, failChannels);
-}
-
-async function sendPagerDutyAlert(
-  incidentId: string,
-  message: string,
-  failChannels: NotificationChannel[]
-): Promise<{ providerId: string }> {
-  ${st};
-  return sendChannelAlert("pagerduty", incidentId, message, failChannels);
-}
-
-async function aggregateResults(
-  incidentId: string,
-  message: string,
-  deliveries: ChannelResult[]
-): Promise<IncidentReport> {
-  ${st};
-  // Demo: stream aggregation progress to the UI
-  const writer = getWritable<ChannelEvent>().getWriter();
-
-  try {
-    await writer.write({ type: "aggregating" }); // Demo: notify UI that aggregation started
-    await delay(AGGREGATE_DELAY_MS); // Demo: simulate processing time for visualization
-
-    const ok = deliveries.filter((delivery) => delivery.status === "sent").length;
-    const failed = deliveries.length - ok;
-    const report: IncidentReport = {
-      incidentId,
-      message,
-      status: "done",
-      deliveries,
-      summary: { ok, failed },
-    };
-
-    await writer.write({ type: "done", summary: report.summary }); // Demo: notify UI of completion
-
-    return report;
-  } finally {
-    writer.releaseLock();
-  }
-}`;
+const stepCode = [
+  extractFunctionBlock(workflowSource, "async function sendChannelAlert("),
+  "",
+  extractFunctionBlock(workflowSource, "async function sendSlackAlert("),
+  "",
+  extractFunctionBlock(workflowSource, "async function sendEmailAlert("),
+  "",
+  extractFunctionBlock(workflowSource, "async function sendSmsAlert("),
+  "",
+  extractFunctionBlock(workflowSource, "async function sendPagerDutyAlert("),
+  "",
+  extractFunctionBlock(workflowSource, "async function aggregateResults("),
+].join("\n");
 
 function collectFunctionBlock(lines: string[], marker: string): number[] {
   const start = lines.findIndex((line) => line.includes(marker));
